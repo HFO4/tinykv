@@ -194,6 +194,24 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	prevLogIndex := r.Prs[to].Next - 1
+	prevLogTerm, _ := r.RaftLog.Term(prevLogIndex)
+	var entries []*pb.Entry
+	for i := prevLogIndex + 1; i <= r.RaftLog.LastIndex(); i++ {
+		entries = append(entries, r.RaftLog.Entry(i))
+	}
+
+	m := pb.Message{
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		MsgType: pb.MessageType_MsgAppend,
+		Index:   prevLogIndex,
+		LogTerm: prevLogTerm,
+		Commit:  r.RaftLog.committed,
+		Entries: entries,
+	}
+	r.msgs = append(r.msgs, m)
 	return false
 }
 
@@ -230,6 +248,19 @@ func (r *Raft) sendRequestVoteResponse(to uint64, granted bool) {
 		Term:    r.Term,
 		Reject:  !granted,
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
+	}
+	r.msgs = append(r.msgs, m)
+}
+
+// sendAppendResponse sends a append RPC response to the given peer.
+func (r *Raft) sendAppendResponse(to uint64, success bool) {
+	// Your Code Here (2A).
+	m := pb.Message{
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		Reject:  !success,
+		MsgType: pb.MessageType_MsgAppendResponse,
 	}
 	r.msgs = append(r.msgs, m)
 }
@@ -298,6 +329,11 @@ func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
 	r.State = StateLeader
+	r.RaftLog.Add(&pb.Entry{
+		Term:  r.Term,
+		Index: r.RaftLog.LastIndex() + 1,
+	})
+	r.brocast(func(u uint64) { r.sendAppend(u) })
 }
 
 func (r *Raft) reset() {
@@ -339,6 +375,8 @@ func (r *Raft) LeaderMessageHandler(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgBeat:
 		r.brocast(func(u uint64) { r.sendHeartbeat(u) })
+	case pb.MessageType_MsgPropose:
+		r.handlePropose(m)
 	}
 	return nil
 }
@@ -351,6 +389,7 @@ func (r *Raft) CandidateMessageHandler(m pb.Message) error {
 		r.handleRequestVoteResponse(m)
 	case pb.MessageType_MsgAppend:
 		r.becomeFollower(m.Term, m.Index)
+		r.handleAppendEntries(m)
 	}
 	return nil
 }
@@ -361,6 +400,8 @@ func (r *Raft) FollowerMessageHandler(m pb.Message) error {
 		r.startElection()
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
 	}
 	return nil
 }
@@ -379,9 +420,36 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	}
 }
 
+// handlePropose handle Propose RPC request
+func (r *Raft) handlePropose(m pb.Message) {
+	for _, entry := range m.Entries {
+		entry.Term = r.Term
+		r.RaftLog.Add(entry)
+	}
+
+	r.brocast(func(u uint64) { r.sendAppend(u) })
+}
+
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	// Reply false if term < currentTerm (§5.1)
+	if m.Term != None && m.Term < r.Term {
+		r.sendAppendResponse(m.From, false)
+		return
+	}
+
+	// Reply false if log doesn’t contain an entry at prevLogIndex
+	// whose term matches prevLogTerm (§5.3)
+	if m.Index > r.RaftLog.LastIndex() {
+		r.sendAppendResponse(m.From, false)
+		return
+	}
+	term, _ := r.RaftLog.Term(m.Index)
+	if term != m.Term {
+		r.sendAppendResponse(m.From, false)
+	}
+
 }
 
 // handleHeartbeat handle Heartbeat RPC request
