@@ -102,3 +102,9 @@ func (l *RaftLog) Add(e *pb.Entry) {
 	// Your Code Here (2A).
 	l.entries = append(l.entries, *e)
 }
+
+// Add given entry to temp storage
+func (l *RaftLog) Set(i uint64, e *pb.Entry) {
+	// Your Code Here (2A).
+	l.entries[i] = *e
+}

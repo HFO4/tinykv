@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -253,13 +254,15 @@ func (r *Raft) sendRequestVoteResponse(to uint64, granted bool) {
 }
 
 // sendAppendResponse sends a append RPC response to the given peer.
-func (r *Raft) sendAppendResponse(to uint64, success bool) {
+func (r *Raft) sendAppendResponse(to uint64, success bool, conflictTerm, conflictIndex uint64) {
 	// Your Code Here (2A).
 	m := pb.Message{
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
 		Reject:  !success,
+		LogTerm: conflictTerm,
+		Index:   conflictIndex,
 		MsgType: pb.MessageType_MsgAppendResponse,
 	}
 	r.msgs = append(r.msgs, m)
@@ -377,6 +380,8 @@ func (r *Raft) LeaderMessageHandler(m pb.Message) error {
 		r.brocast(func(u uint64) { r.sendHeartbeat(u) })
 	case pb.MessageType_MsgPropose:
 		r.handlePropose(m)
+	case pb.MessageType_MsgAppendResponse:
+		r.handleAppendResponse(m)
 	}
 	return nil
 }
@@ -424,6 +429,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 func (r *Raft) handlePropose(m pb.Message) {
 	for _, entry := range m.Entries {
 		entry.Term = r.Term
+		entry.Index = r.RaftLog.LastIndex() + 1
 		r.RaftLog.Add(entry)
 	}
 
@@ -433,23 +439,72 @@ func (r *Raft) handlePropose(m pb.Message) {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	r.electionElapsed = 0
+
 	// Reply false if term < currentTerm (§5.1)
 	if m.Term != None && m.Term < r.Term {
-		r.sendAppendResponse(m.From, false)
+		r.sendAppendResponse(m.From, false, None, None)
 		return
 	}
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	if m.Index > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m.From, false)
+		r.sendAppendResponse(m.From, false, None, r.RaftLog.LastIndex()+1)
 		return
 	}
 	term, _ := r.RaftLog.Term(m.Index)
 	if term != m.Term {
-		r.sendAppendResponse(m.From, false)
+		var conflictIndex uint64
+		for index := 1; index < len(r.RaftLog.entries); index++ {
+			if r.RaftLog.entries[index].Term == term {
+				conflictIndex = r.RaftLog.entries[index].Index
+				break
+			}
+		}
+		r.sendAppendResponse(m.From, false, term, conflictIndex)
 	}
 
+	for _, entry := range m.Entries {
+		if entry.Index <= r.RaftLog.LastIndex() {
+			term, _ := r.RaftLog.Term(entry.Index)
+
+			if term != entry.Term {
+				r.RaftLog.Set(entry.Index, entry)
+			}
+		} else {
+			r.RaftLog.Add(entry)
+		}
+	}
+
+	if m.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = min(m.Commit, m.Index+uint64(len(m.Entries)))
+	}
+
+	r.sendAppendResponse(m.From, true, None, None)
+}
+
+// handleAppendEntries handle AppendEntries RPC request
+func (r *Raft) handleAppendResponse(m pb.Message) {
+	if m.Term != None && m.Term < r.Term {
+		return
+	}
+
+	if m.Reject {
+		index := m.Index
+		if index == None {
+			return
+		}
+
+		if m.LogTerm != None {
+			sliceIndex := sort.Search(len(l.entries),
+				func(i int) bool { return l.entries[i].Term > logTerm })
+			if sliceIndex > 0 && l.entries[sliceIndex-1].Term == logTerm {
+				index = l.toEntryIndex(sliceIndex)
+			}
+		}
+		r.Prs[m.From].Next = index
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
