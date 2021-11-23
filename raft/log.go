@@ -56,7 +56,9 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return &RaftLog{}
+	return &RaftLog{
+		entries: make([]pb.Entry, 1),
+	}
 }
 
 // We need to compact the log entries in some point of time like
@@ -80,12 +82,23 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
-	// Your Code Here (2A).
-	return 0
+	return uint64(len(l.entries)) - 1
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	return l.Entry(i).Term, nil
+}
+
+// Entry return the entry in the given index
+func (l *RaftLog) Entry(i uint64) *pb.Entry {
+	// Your Code Here (2A).
+	return &l.entries[i]
+}
+
+// Add given entry to temp storage
+func (l *RaftLog) Add(e *pb.Entry) {
+	// Your Code Here (2A).
+	l.entries = append(l.entries, *e)
 }
