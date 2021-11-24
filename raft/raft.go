@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"sort"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -172,18 +171,25 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
+	hstate, cstate, _ := c.Storage.InitialState()
 	r := &Raft{
 		RaftLog:          newLog(c.Storage),
 		State:            StateFollower,
 		id:               c.ID,
 		electionTimeout:  c.ElectionTick,
 		heartbeatTimeout: c.HeartbeatTick,
+		Term:             hstate.Term,
+		Vote:             hstate.Vote,
+	}
+
+	if c.peers == nil {
+		c.peers = cstate.Nodes
 	}
 
 	prs := make(map[uint64]*Progress)
 	for i := 0; i < len(c.peers); i++ {
 		prs[c.peers[i]] = &Progress{
-			0, 1,
+			0, r.RaftLog.LastIndex() + 1,
 		}
 	}
 	r.Prs = prs
@@ -231,10 +237,13 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // sendRequestVote sends a requestVote RPC to the given peer.
 func (r *Raft) sendRequestVote(to uint64) {
 	// Your Code Here (2A).
+	term, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 	m := pb.Message{
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
+		Index:   r.RaftLog.LastIndex(),
+		LogTerm: term,
 		MsgType: pb.MessageType_MsgRequestVote,
 	}
 	r.msgs = append(r.msgs, m)
@@ -336,6 +345,8 @@ func (r *Raft) becomeLeader() {
 		Term:  r.Term,
 		Index: r.RaftLog.LastIndex() + 1,
 	})
+
+	r.updateSelfProgress()
 	r.brocast(func(u uint64) { r.sendAppend(u) })
 }
 
@@ -433,6 +444,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 		r.RaftLog.Add(entry)
 	}
 
+	r.updateSelfProgress()
 	r.brocast(func(u uint64) { r.sendAppend(u) })
 }
 
@@ -454,7 +466,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 	term, _ := r.RaftLog.Term(m.Index)
-	if term != m.Term {
+	if term != m.LogTerm {
 		var conflictIndex uint64
 		for index := 1; index < len(r.RaftLog.entries); index++ {
 			if r.RaftLog.entries[index].Term == term {
@@ -463,6 +475,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			}
 		}
 		r.sendAppendResponse(m.From, false, term, conflictIndex)
+		return
 	}
 
 	for _, entry := range m.Entries {
@@ -470,7 +483,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			term, _ := r.RaftLog.Term(entry.Index)
 
 			if term != entry.Term {
-				r.RaftLog.Set(entry.Index, entry)
+				r.RaftLog.SetAndTruncate(entry.Index, entry)
 			}
 		} else {
 			r.RaftLog.Add(entry)
@@ -497,14 +510,27 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		}
 
 		if m.LogTerm != None {
-			sliceIndex := sort.Search(len(l.entries),
-				func(i int) bool { return l.entries[i].Term > logTerm })
-			if sliceIndex > 0 && l.entries[sliceIndex-1].Term == logTerm {
-				index = l.toEntryIndex(sliceIndex)
+			conflictTermIndex := -1
+			for i := len(r.RaftLog.entries) - 1; i >= 1; i-- {
+				if r.RaftLog.entries[i].Term == m.LogTerm {
+					conflictTermIndex = i
+					break
+				}
+			}
+
+			if conflictTermIndex != -1 {
+				index = r.RaftLog.Entry(uint64(conflictTermIndex + 1)).Index
 			}
 		}
+
 		r.Prs[m.From].Next = index
+		r.sendAppend(m.From)
+		return
 	}
+
+	r.Prs[m.From].Match = m.Index
+	r.Prs[m.From].Next = m.Index + 1
+	r.updateLeaderCommitIndex()
 }
 
 // handleHeartbeat handle Heartbeat RPC request
@@ -524,13 +550,44 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		return
 	}
 
-	if r.Vote == None || r.Vote == m.From {
+	lastTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
+	if (r.Vote == None || r.Vote == m.From) && isLeastUpToDate(m.Index, m.LogTerm, r.RaftLog.LastIndex(), lastTerm) {
 		r.Vote = m.From
 		r.sendRequestVoteResponse(m.From, true)
 		return
 	}
 
 	r.sendRequestVoteResponse(m.From, false)
+}
+
+func (r *Raft) updateLeaderCommitIndex() {
+	for n := r.RaftLog.committed + 1; n <= r.RaftLog.LastIndex(); n++ {
+		if r.RaftLog.Entry(n).Term == r.Term {
+			validCount := 0
+			for id, pr := range r.Prs {
+				if id == r.id {
+					validCount++
+				} else {
+					if pr.Match >= n {
+						validCount++
+					}
+				}
+			}
+
+			if validCount > len(r.Prs)/2 {
+				r.RaftLog.committed = n
+			}
+		}
+	}
+}
+
+func (r *Raft) updateSelfProgress() {
+	// update progress for leader itself
+	r.Prs[r.id].Match = r.RaftLog.LastIndex()
+	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+	if len(r.Prs) == 1 {
+		r.RaftLog.committed = r.Prs[r.id].Match
+	}
 }
 
 // addNode add a new node to raft group

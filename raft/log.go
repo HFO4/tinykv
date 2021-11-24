@@ -50,14 +50,24 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	firstIndex uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
+	hstate, _, _ := storage.InitialState()
+	lo, _ := storage.FirstIndex()
+	hi, _ := storage.LastIndex()
+	entries, _ := storage.Entries(lo, hi+1)
 	return &RaftLog{
-		entries: make([]pb.Entry, 1),
+		storage:    storage,
+		entries:    entries,
+		stabled:    hi,
+		firstIndex: lo,
+		applied:    lo - 1,
+		committed:  hstate.Commit,
 	}
 }
 
@@ -71,30 +81,45 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	if len(l.entries) > 0 {
+		return l.entries[l.stabled-l.firstIndex+1:]
+	}
+	return l.entries
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
+	if len(l.entries) > 0 {
+		return l.entries[l.applied-l.firstIndex+1 : l.committed-l.firstIndex+1]
+	}
 	return nil
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
-	return uint64(len(l.entries)) - 1
+	if len(l.entries) > 0 {
+		return l.entries[len(l.entries)-1].Index
+	}
+
+	res, _ := l.storage.LastIndex()
+	return res
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return l.Entry(i).Term, nil
+	if len(l.entries) > 0 && i >= l.firstIndex {
+		return l.entries[i-l.firstIndex].Term, nil
+	}
+
+	return l.storage.Term(i)
 }
 
 // Entry return the entry in the given index
 func (l *RaftLog) Entry(i uint64) *pb.Entry {
 	// Your Code Here (2A).
-	return &l.entries[i]
+	return &l.entries[i-l.firstIndex]
 }
 
 // Add given entry to temp storage
@@ -103,8 +128,9 @@ func (l *RaftLog) Add(e *pb.Entry) {
 	l.entries = append(l.entries, *e)
 }
 
-// Add given entry to temp storage
-func (l *RaftLog) Set(i uint64, e *pb.Entry) {
-	// Your Code Here (2A).
-	l.entries[i] = *e
+// Set entry in given index and delete all follows it
+func (l *RaftLog) SetAndTruncate(i uint64, e *pb.Entry) {
+	l.entries[i-l.firstIndex] = *e
+	l.entries = l.entries[:i-l.firstIndex+1]
+	l.stabled = min(l.stabled, e.Index-1)
 }
