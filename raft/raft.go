@@ -336,6 +336,10 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Term = term
 	r.State = StateFollower
 	r.Vote = None
+	if r.Lead == r.id {
+		r.Lead = None
+	}
+
 	r.reset()
 	DPrintf("[%d] become FOLLOWER in term (%d).", r.id, r.Term)
 }
@@ -360,7 +364,7 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	r.Lead = r.id
 	r.reset()
-	r.updateSelfProgress()
+	r.updateSelfProgress(r.RaftLog.LastIndex() + 1)
 	for peer := range r.Prs {
 		if peer != r.id {
 			r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
@@ -496,7 +500,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 		DPrintf("[%d] received new log from client: Index={%d}, Term=(%d).", r.id, entry.Index, r.Term)
 	}
 
-	r.updateSelfProgress()
+	r.updateSelfProgress(r.RaftLog.LastIndex())
 	r.brocast(func(u uint64) { r.sendAppend(u) })
 }
 
@@ -658,9 +662,9 @@ func (r *Raft) updateLeaderCommitIndex() {
 	}
 }
 
-func (r *Raft) updateSelfProgress() {
+func (r *Raft) updateSelfProgress(next uint64) {
 	// update progress for leader itself
-	r.Prs[r.id].Match = r.RaftLog.LastIndex() + 1
+	r.Prs[r.id].Match = next
 	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 	if len(r.Prs) == 1 {
 		r.RaftLog.committed = r.Prs[r.id].Match
@@ -675,4 +679,19 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+}
+
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
 }
