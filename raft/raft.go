@@ -250,6 +250,30 @@ func (r *Raft) sendRequestVote(to uint64) {
 	r.msgs = append(r.msgs, m)
 }
 
+// sendTimeoutNow sends a timeout now to the given peer.
+func (r *Raft) sendTimeoutNow(to uint64) {
+	// Your Code Here (2A).
+	m := pb.Message{
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		MsgType: pb.MessageType_MsgTimeoutNow,
+	}
+	r.msgs = append(r.msgs, m)
+}
+
+// sendTransferLeader sends a leader transfer RPC to the given peer.
+func (r *Raft) sendTransferLeader(to uint64) {
+	// Your Code Here (2A).
+	m := pb.Message{
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		MsgType: pb.MessageType_MsgTransferLeader,
+	}
+	r.msgs = append(r.msgs, m)
+}
+
 // sendRequestVote sends a requestVote RPC to the given peer.
 func (r *Raft) sendRequestVoteResponse(to uint64, granted bool) {
 	// Your Code Here (2A).
@@ -421,11 +445,15 @@ func (r *Raft) LeaderMessageHandler(m pb.Message) error {
 	case pb.MessageType_MsgBeat:
 		r.brocast(func(u uint64) { r.sendHeartbeat(u) })
 	case pb.MessageType_MsgPropose:
-		r.handlePropose(m)
+		if r.leadTransferee == None {
+			r.handlePropose(m)
+		}
 	case pb.MessageType_MsgAppendResponse:
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.brocast(func(u uint64) { r.sendAppend(u) })
+	case pb.MessageType_MsgTransferLeader:
+		r.handleLeaderTransfer(m)
 	}
 	return nil
 }
@@ -446,6 +474,10 @@ func (r *Raft) CandidateMessageHandler(m pb.Message) error {
 		if m.Term == r.Term {
 			r.becomeFollower(m.Term, m.From)
 		}
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.sendTransferLeader(r.Lead)
 	}
 	return nil
 }
@@ -460,6 +492,10 @@ func (r *Raft) FollowerMessageHandler(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.sendTransferLeader(r.Lead)
 	}
 	return nil
 }
@@ -541,6 +577,13 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 	for _, entry := range m.Entries {
+		if entry.EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex != None {
+				continue
+			}
+			r.PendingConfIndex = entry.Index
+		}
+
 		if entry.Index <= r.RaftLog.LastIndex() {
 			term, _ := r.RaftLog.Term(entry.Index)
 
@@ -595,6 +638,11 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	r.Prs[m.From].Match = m.Index
 	r.Prs[m.From].Next = m.Index + 1
 	r.updateLeaderCommitIndex()
+
+	if r.leadTransferee == m.From && r.Prs[m.From].Match >= r.RaftLog.LastIndex() {
+		r.leadTransferee = None
+		r.sendTimeoutNow(m.From)
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
@@ -608,6 +656,32 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.sendHeartbeatResponse(m.From, false)
+}
+
+// handleLeaderTransfer leader transferRPC request
+func (r *Raft) handleLeaderTransfer(m pb.Message) {
+	if m.From == r.id || !r.isPeerExist(m.From) {
+		DPrintf("[%d] received req to transfer leader to [%d], abort as node not exist.", r.id, m.From)
+		return
+	}
+
+	DPrintf("[%d] received req to transfer leader to [%d].", r.id, m.From)
+	if r.Prs[m.From].Match < r.RaftLog.LastIndex() {
+		DPrintf("[%d] transfer leader to [%d] but its log is not up-to-date.", r.id, m.From)
+		r.leadTransferee = m.From
+		r.sendAppend(m.From)
+		return
+	}
+
+	r.sendTimeoutNow(m.From)
+}
+
+// handleTimeoutNow handle timeout now RPC request
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	if m.From != r.id && r.isPeerExist(r.id) {
+		DPrintf("[%d] want leader from [%d], start election.", r.id, m.From)
+		r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
+	}
 }
 
 // handleSnapshot handle Snapshot RPC request
@@ -674,11 +748,18 @@ func (r *Raft) updateSelfProgress(next uint64) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	r.Prs[id] = &Progress{0, r.RaftLog.LastIndex() + 1}
+	r.PendingConfIndex = None
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	r.PendingConfIndex = None
+	if r.State == StateLeader {
+		r.updateLeaderCommitIndex()
+	}
 }
 
 func (r *Raft) softState() *SoftState {
@@ -694,4 +775,9 @@ func (r *Raft) hardState() pb.HardState {
 		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
 	}
+}
+
+func (r *Raft) isPeerExist(id uint64) bool {
+	_, ok := r.Prs[id]
+	return ok
 }

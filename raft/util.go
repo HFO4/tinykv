@@ -138,7 +138,7 @@ func isLeastUpToDate(aIndex, aTerm, bIndex, bTerm uint64) bool {
 }
 
 // Debugging
-var Debug = 0
+var Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
