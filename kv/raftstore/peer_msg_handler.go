@@ -10,6 +10,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -43,6 +44,22 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+
+	if !d.RaftGroup.HasReady() {
+		return
+	}
+
+	rd := d.RaftGroup.Ready()
+	d.peerStorage.SaveReadyState(&rd)
+	d.Send(d.ctx.trans, rd.Messages)
+	for _, entry := range rd.CommittedEntries {
+		d.process(entry)
+	}
+	d.RaftGroup.Advance(rd)
+}
+
+func (d *peerMsgHandler) process(entry eraftpb.Entry) {
+	entry.EntryType
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -114,6 +131,20 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+
+	for _, req := range msg.Requests {
+		reqData, err := req.Marshal()
+		if err != nil {
+			log.Debugf("Failed to marshal request: %s", err)
+		}
+
+		d.RaftGroup.Propose(reqData)
+		d.proposals = append(d.proposals, &proposal{
+			index: d.RaftGroup.Raft.RaftLog.LastIndex(),
+			term:  d.RaftGroup.Raft.Term,
+			cb:    cb,
+		})
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
